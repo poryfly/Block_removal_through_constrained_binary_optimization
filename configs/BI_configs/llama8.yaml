@@ -1,0 +1,18 @@
+model:
+  path: "models/Llama-3.1-8B-Instruct/"
+  dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  output_path: "output/block_influence/Llama-3.1-8B-Instruct/"
+  output_format: "hf"
+
+calibration:
+  dataset_path:  "datasets/OpenHermes-2.5/preprocessed-Llama-3.1-8B-Instruct/"
+  n_samples: 2048
+  seed: 42
+  batch_size: 1
+  sequence_filter: null
+  max_length: 2048
+pruning:
+  number_of_blocks_to_remove: [8]
+  pruning_type: "one_by_one" # one_by_one or "consecutive"
+  save_model: True

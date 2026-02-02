@@ -1,0 +1,6 @@
+tokenizer:
+  path: "models/Qwen3-14B/"
+  model_type: "qwen3"
+dataset:
+  name:  "teknium/OpenHermes-2.5"
+  output_path: "datasets/OpenHermes-2.5/preprocessed-Qwen3-14B/"

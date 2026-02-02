@@ -1,0 +1,19 @@
+model:
+  path: "models/Qwen3-14B/"
+  dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  output_path: "norm_ratio/Qwen3-14B_n_samples_2048_think"
+  output_format: "hf"
+
+
+calibration:
+  dataset_path:  "datasets/OpenHermes-2.5/preprocessed-Qwen3-14B_think/"
+  n_samples: 2048
+  seed: 42
+  batch_size: 1
+  sequence_filter: null
+  max_length: 2048
+pruning:
+  number_of_blocks_to_remove: [8]
+  pruning_type: "one_by_one" # one_by_one or "consecutive"
+  save_model: True

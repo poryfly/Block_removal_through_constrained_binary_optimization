@@ -1,0 +1,43 @@
+model:
+  path: "block_influence/Qwen3-14B_n_samples_2048_think/final_models/bi_one_by_one_12_removed/checkpoint-30986/"
+  dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  output_format: "hf"
+  save_model: False
+teacher_model:
+  path: "models/Qwen3-14B/"
+  dtype: "bfloat16"
+
+dataset:
+  path:  "datasets/OpenHermes-2.5/preprocessed-Qwen3-14B_think"
+  test_size: 0.01
+  seed: 42
+  shuffle: True
+
+training:
+  output_dir: "output"
+
+  # Training duration - online healing for larger model
+  max_steps: 10000
+  num_train_epochs: 1  # Use max_steps instead
+
+  # Batch size configuration for 8B model
+  per_device_train_batch_size: 4  # Reduced for larger model
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1  # Maintain effective batch size =  32* 16 * num_gpus
+
+  # Learning rate and optimization - conservative for 8B model
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 100  # 10% of max_steps
+  max_grad_norm: 1.0
+  lr_scheduler_type: "cosine"
+  max_length: 1024
+  # Logging and checkpointing
+  logging_steps: 10
+  save_steps: 5000 # changed from 2000 to 10000
+  eval_steps: 10000 #changed from 1000 to 5000
+  packing: False
+  #deepspeed: "src/
+  #deepspeed: "src/
+

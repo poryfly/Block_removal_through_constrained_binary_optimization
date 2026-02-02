@@ -1,0 +1,19 @@
+model:
+  path: "models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+  dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  output_path: "output/Amatrices/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/"
+  output_format: "hf"
+  save_model: false
+
+calibration:
+  dataset_path: "datasets/nemotron_data/"
+  n_samples: 2048
+  seed: 42
+  batch_size: 1
+  sequence_filter: 6000
+
+pruning:
+  number_of_blocks_to_remove: [2]
+  pruning_type: "one_by_one"
+  interval_size: 2

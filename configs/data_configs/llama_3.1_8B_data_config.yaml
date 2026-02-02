@@ -1,0 +1,6 @@
+tokenizer:
+  path: "models/Llama-3.1-8B-Instruct/"
+  model_type: "llama"
+dataset:
+  name:  "teknium/OpenHermes-2.5"
+  output_path: "datasets/OpenHermes-2.5/preprocessed-Llama-3.1-8B-Instruct/"
