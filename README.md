@@ -1,6 +1,6 @@
 # Code Repository
 
-This repository contains the code used to generate the results in the accompanying ICML submission.  
+This repository contains the code used to generate the results in [Block removal for large language models through constrained binary optimization](https://arxiv.org/abs/2602.00161).  
 The pipeline consists of **data preparation**, **binary optimization for Hessian construction**, **energy computation**, and **model compression**, followed by **fine-tuning and benchmarking** against alternative methods.
 
 ---
@@ -149,7 +149,15 @@ The following ratios were used in the experiments:
 ---
 ## License
 Patent Pending. The intended use is strictly limited to research and non-commercial projects.
-
+If you find these results useful, please cite 
+```
+@article{jansen2026block,
+  title={Block removal for large language models through constrained binary optimization},
+  author={Jansen, David and Rausch, Roman and Montero, David and Orus, Roman},
+  journal={arXiv preprint arXiv:2602.00161},
+  year={2026}
+}
+```
 ## Notes
 
 - All paths, hyperparameters, and preprocessing steps are specified via configuration files to ensure reproducibility.
