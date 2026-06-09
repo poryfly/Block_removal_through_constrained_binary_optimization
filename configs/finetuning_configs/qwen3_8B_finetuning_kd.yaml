@@ -1,16 +1,16 @@
 model:
-  path: "/data/work/Block_removal_through_constrained_binary_optimization/Amatrices/Qwen3-14B_n_samples_2048_think/energies_del12/compressed_model_state_1_remove_21_23_24_25_26_27_28_29_30_32_35_37"
+  path: "/data2/work/Block_removal_through_constrained_binary_optimization/Amatrices/Qwen3-8B_n_samples_2048_think/energies_del8/compressed_model_state_1"
   dtype: "bfloat16"
   attn_implementation: "flash_attention_2"
   output_format: "hf"
   save_model: False
 teacher_model:
-  path: "/data/.cache/models/Qwen/Qwen3-14B"
+  path: "/data/.cache/models/Qwen/Qwen3-8B"
   dtype: "bfloat16"
 
 dataset:
-  path:  "/data/work/Block_removal_through_constrained_binary_optimization/datasets/OpenHermes-2.5/preprocessed-Qwen3-14B"
-  test_size: 0.01
+  path:  "/data/work/Block_removal_through_constrained_binary_optimization/datasets/ShareGPT-Chinese-English-90k/preprocessed-Qwen3-8B"
+  test_size: 0.005
   seed: 42
   shuffle: True
 
@@ -24,7 +24,7 @@ training:
   # Batch size configuration for 8B model
   per_device_train_batch_size: 1  # Reduced for larger model
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 4  # Maintain effective batch size =  32* 16 * num_gpus
+  gradient_accumulation_steps: 2  # Maintain effective batch size =  32* 16 * num_gpus
 
   # Learning rate and optimization - conservative for 8B model
   learning_rate: 1.0e-4
@@ -35,9 +35,10 @@ training:
   max_length: 1024
   # Logging and checkpointing
   logging_steps: 10
-  save_steps: 10000 # changed from 2000 to 10000
-  eval_steps: 1000 #changed from 1000 to 5000
+  save_steps: 100 # 每100步保存checkpoint，减少中断后进度丢失
+  eval_steps: 100 #changed from 1000 to 5000
   packing: False
+  resume_from_checkpoint: null  # null=自动检测最新checkpoint, 或指定路径
   #deepspeed: "src/
   #deepspeed: "src/
 

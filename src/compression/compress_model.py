@@ -89,14 +89,15 @@ def main():
         vecs.append(d["vecs"][j])
         indices.append(idx)
     for i in range(int(args.k)):
-        model = AutoModelForCausalLM.from_pretrained(args.model_name)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         layers_to_remove = torch.where(vecs[i] == 1)[0].tolist()
         print(energies[i], layers_to_remove)
         s = "_".join(map(str, layers_to_remove))
+        print(f"for k at {i} remove layers {s}")
         model = compress_model(model, layers_to_remove)
-        model.save_pretrained(f"{filename}/compressed_model_state_{i}_remove_{s}")
-        tokenizer.save_pretrained(f"{filename}/compressed_model_state_{i}_remove_{s}")
+        model.save_pretrained(f"{filename}/compressed_model_state_{i}")
+        tokenizer.save_pretrained(f"{filename}/compressed_model_state_{i}")
         del model
         del tokenizer
 

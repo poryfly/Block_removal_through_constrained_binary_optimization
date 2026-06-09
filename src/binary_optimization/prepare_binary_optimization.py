@@ -4,6 +4,7 @@ import yaml
 from  src.binary_optimization.utils import (
     prepare_pruning
 )
+from src.prepare_data.encoding_dsv4 import encode_messages, parse_message_from_completion_text  
 
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -39,7 +40,7 @@ scale=1.0
 
 batch_size=1
 model = AutoModelForCausalLM.from_pretrained(
-        config["model"]["path"],  device_map="auto",dtype=torch.bfloat16)
+        config["model"]["path"],  device_map="auto",dtype=torch.bfloat16, trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(config["model"]["path"])
 tokenizer.pad_token = tokenizer.eos_token
 dataset = load_from_disk(config["calibration"]["dataset_path"])
@@ -64,7 +65,19 @@ assert(config["calibration"]["batch_size"]==1)
 prepare_pruning(
     model, scale
     )
-model=model.to(torch.bfloat16)
+# Skip global dtype conversion for FP8-quantized models (e.g. DeepSeek-V4)
+# FP8 -> BF16 doubles memory (~160GB -> ~316GB), causing OOM on 8x32GB GPUs
+# FP8 weights are automatically dequantized during computation; pruning_param is already bf16
+# quantization_config can be either a dict (from AutoConfig) or FineGrainedFP8Config object (from model loading)
+qc = getattr(model.config, 'quantization_config', None)
+is_fp8 = False
+if qc is not None:
+    try:
+        is_fp8 = qc.quant_method == 'fp8'
+    except AttributeError:
+        is_fp8 = qc.get('quant_method') == 'fp8'
+if not is_fp8:
+    model = model.to(torch.bfloat16)
 
 for name, param in model.named_parameters():
     if "pruning_param" in name:
@@ -84,23 +97,38 @@ for i in range(len(params)):
     grads[i]=[]
 
 device_map=model.hf_device_map
-model = dispatch_model(model, device_map=device_map)
+# For FP8-quantized models (e.g. DeepSeek-V4), skip dispatch_model because:
+# 1. Sub-modules are reused by reference from original layer (already on correct GPU)
+# 2. dispatch_model would try to move new top-level layer objects, potentially causing OOM
+# 3. The sub-modules' existing dispatch hooks still work for device management
+# For non-FP8 models (Llama/Qwen3), new layers are created on CPU and need dispatch to move to GPU
+if not is_fp8:
+    model = dispatch_model(model, device_map=device_map)
+else:
+    print("Skipping dispatch_model for FP8 model (sub-modules already on correct devices)")
 
 print("number of parameters", len(params))
 
 messages = [
     {"role": "user", "content": "Who are you?"},
 ]
-inputs = tokenizer.apply_chat_template(
-	messages,
-	add_generation_prompt=True,
-	tokenize=True,
-	return_dict=True,
-	return_tensors="pt",
-).to(model.device)
+if config["model"]["model_type"] == "deepseek-v4":
+    messages = encode_messages(messages, thinking_mode="chat")
+    inputs = tokenizer(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(model.device)
+else:
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    ).to(model.device)
 
-outputs = model.generate(**inputs, max_new_tokens=40)
-print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
+try:
+    outputs = model.generate(**inputs, max_new_tokens=40)
+    print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
+except Exception as e:
+    print(f"Warning: model.generate() failed: {e}. Skipping sanity check.")
 device = next(model.parameters()).device
 for batch in tqdm(dataloader, desc="Processing examples"):
     batch = {k: v.to(device) for k, v in batch.items()}

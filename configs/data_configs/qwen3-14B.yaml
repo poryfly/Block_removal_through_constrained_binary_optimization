@@ -1,5 +1,5 @@
 tokenizer:
-  path: "models/Qwen3-14B/"
+  path: "/data/.cache/models/Qwen/Qwen3-14B"
   model_type: "qwen3"
 dataset:
   name:  "teknium/OpenHermes-2.5"

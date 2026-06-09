@@ -26,43 +26,49 @@ def modify_conversation_keys(row):
         dict: Modified dictionary with standardized conversation roles.
     """
     modified_conversation = []
-    for entry in row["conversations"]:
-        modified_entry = {
-            "role": "user"
-            if entry["from"] == "human"
-            else "assistant"
-            if entry["from"] == "gpt"
-            else entry["from"],
-            "content": entry["value"],
-        }
-        modified_conversation.append(modified_entry)
+    for entry in row["conversation"]:
+        for key, value in entry.items():
+            if key == 'assistant':
+                role = 'assistant'
+                content = value
+            elif key == 'human':
+                role = 'user'
+                content = value
+            else:
+                print(f"not support key: {key}")
+                continue
+            modified_entry = {
+                "role": role,
+                "content": content,
+            }
+            modified_conversation.append(modified_entry)
 
     return {"conversations": modified_conversation}
 
-dataset = load_dataset(config["dataset"]["name"])
-print(dataset)
-dataset=dataset["train"]
-print(dataset[0]["conversations"])
 
+
+
+data_path = config["dataset"]["name"]
+print(f"Loading dataset from {data_path}")
+dataset = load_dataset("json", data_files=f"{data_path}/*.jsonl")
+dataset=dataset["train"]
 
 
 tokenizer = AutoTokenizer.from_pretrained(
-    config["tokenizer"]["path"],
-    use_fast=True
-)
-print(tokenizer.__class__.__name__)
+            config["tokenizer"]["path"],
+            use_fast=True
+        )
 tokenizer.pad_token = tokenizer.eos_token
-assert tokenizer.chat_template is not None, "Tokenizer has no chat template"
 
 
 
-print(dataset[0]["conversations"])
+
+
 dataset = dataset.map(
     modify_conversation_keys,
     batched=False
 )
 
-print(dataset[0]["conversations"])
 def tokenize_conversation(example):
     """
     Tokenizes a conversation example using the appropriate chat template.
@@ -86,29 +92,38 @@ def tokenize_conversation(example):
     """
     # apply_chat_template returns the formatted string
     if config["tokenizer"]["model_type"] == "llama":
-        tokenized_text = tokenizer.apply_chat_template(example["conversations"])
+
+        assert tokenizer.chat_template is not None, "Tokenizer has no chat template"
+
+        text = tokenizer.apply_chat_template(example["conversations"], tokenize=False)
+        tokenized_text = tokenizer(text)
 
     elif config["tokenizer"]["model_type"] == "qwen3":
+
+        assert tokenizer.chat_template is not None, "Tokenizer has no chat template"
   
         #text = tokenizer.apply_chat_template(example["conversations"],add_generation_prompt=False)
-        tokenized_text = tokenizer.apply_chat_template(example["conversations"], add_generation_prompt=False)
+        text = tokenizer.apply_chat_template(example["conversations"], add_generation_prompt=False, tokenize=False)
+        tokenized_text = tokenizer(text)
+    elif config["tokenizer"]["model_type"] == "deepseek4":
+        from encoding_dsv4 import encode_messages, parse_message_from_completion_text
+        text = encode_messages(example["conversations"], thinking_mode="chat")
+        tokenized_text = tokenizer(text)
 
     else:
         raise ValueError(f"Model type {config['tokenizer']['model_type']} not supported")
     return {"input_ids": tokenized_text["input_ids"], "labels": tokenized_text["input_ids"], "length": len(tokenized_text["input_ids"]), "attention_mask": tokenized_text["attention_mask"]}
 columns_to_keep = ["input_ids", "labels", "length", "attention_mask"]
 
-tokenized_dataset = dataset.map(tokenize_conversation,    batched=False,
+tokenized_dataset = dataset.map(tokenize_conversation,    batched=False, num_proc=16, 
     remove_columns=["conversations"])
 columns_to_remove = [col for col in tokenized_dataset.column_names if col not in columns_to_keep]
 tokenized_dataset = tokenized_dataset.remove_columns(columns_to_remove)
-print(tokenized_dataset[0])
-print(tokenized_dataset)
 
 tokenized_dataset.save_to_disk(config["dataset"]["output_path"])
 ids=tokenized_dataset[0]["input_ids"]
 print(ids)
 print(tokenized_dataset[0]["labels"])
 print(len(ids))
-print(tokenizer.decode(ids))
+print(tokenizer.decode(ids[0]))
 

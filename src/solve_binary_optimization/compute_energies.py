@@ -1,38 +1,36 @@
 
 import torch
+import torch.multiprocessing as mp
 import time
 import os
 import math
 import argparse
-from itertools import combinations
+from itertools import combinations, islice
+from concurrent.futures import ThreadPoolExecutor
 
 import sys
 sys.path.insert(0, os.getcwd())
 
 from util import binom
 
+
 @torch.no_grad()
-def bitset_batches_exact_zeros(
+def bitset_batches_from_iter(
+    comb_iter,
     n_bits: int,
     exact_zeros: int,
     batch_size: int,
     device=None,
 ):
     """
-    Generate all bitstrings of length n_bits that contain exactly `exact_zeros`
-    zeros, in batches, without enumerating all 2**n_bits states.
+    Generate bitstrings from a custom combination iterator, in batches.
+    Each yielded batch contains only combinations from the provided iterator,
+    allowing each GPU worker to supply its own sliced range via itertools.islice.
 
     Yields per batch:
         indices: (B,)        int64 tensor with integer indices (0..2**n_bits-1)
         vecs:    (B, n_bits) float64 tensor of 0/1 bits (column 0 = MSB)
     """
-    if n_bits <= 0:
-        raise ValueError("n_bits must be positive")
-    if not (0 <= exact_zeros <= n_bits):
-        raise ValueError("exact_zeros must be in [0, n_bits]")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -79,8 +77,7 @@ def bitset_batches_exact_zeros(
         batch_positions = []
         return indices, vecs
 
-    # Use itertools.combinations to generate all k-subsets of {0, …, n-1}
-    for comb in combinations(range(n), k):
+    for comb in comb_iter:
         batch_positions.append(comb)
         if len(batch_positions) >= batch_size:
             out = flush()
@@ -93,93 +90,222 @@ def bitset_batches_exact_zeros(
         yield out
 
 
-def energy(vec, H):
+@torch.no_grad()
+def bitset_batches_exact_zeros(
+    n_bits: int,
+    exact_zeros: int,
+    batch_size: int,
+    device=None,
+):
+    """
+    Original interface: generates all bitstrings with exactly `exact_zeros` zeros.
+    Delegates to bitset_batches_from_iter with the full combination iterator.
+    """
+    comb_iter = combinations(range(n_bits), exact_zeros)
+    yield from bitset_batches_from_iter(comb_iter, n_bits, exact_zeros, batch_size, device)
+
+
+def energy(vecs, H):
     """
     vec: (B, n_bits), float64
     H:   (n_bits, n_bits), float64
     Returns: (B,) energies, one per vector in the batch.
+    Optimized: matmul instead of einsum for better cuBLAS utilization.
+    v^T H v = sum_i (Hv)_i * v_i  where Hv = v @ H
     """
-    # Batched quadratic form: v^T H v for each v in vec
-    return torch.einsum('bi,ij,bj->b', vec, H, vec)
+    Hv = vecs @ H               # (B, n_bits) @ (n_bits, n_bits) -> (B, n_bits)
+    return (Hv * vecs).sum(dim=1)  # element-wise multiply + sum -> (B,)
 
 
-if __name__ == "__main__":
+def worker(rank, world_size, args):
+    """
+    GPU worker: processes its share of the combination space.
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-A_directory", type=str, default="Amatrices/Llama-3-8B-Instruct_n_samples_2048/")
-    parser.add_argument("-ndel", type=int, default=8)
-    parser.add_argument("-batch_size", type=int, default=1024*1024*8)
-    args = parser.parse_args()
+    The total C(n_bits, exact_ones) combinations are split across
+    world_size GPUs by rank. Each worker uses itertools.islice
+    to skip to its assigned range, then processes batches normally.
+    """
+    gpu_id = rank
+    device = f"cuda:{gpu_id}"
 
-    device = "cuda:0"
+    # Load A and compute H on this GPU
     A = torch.load(f"{args.A_directory}/A.pt")
-    n=A.shape[0]
+    n = A.shape[0]
     A = A.to(torch.double)
-    
-    H = torch.transpose(A, 0, 1) @ A / n
-    print(H)
-    print("A.shape=", A.shape, "H.shape=", H.shape)
-    H = H.to(device)
+    H = (A.T @ A / n).to(device)
+
+    if rank == 0:
+        print(H)
+        print(f"A.shape={A.shape}, H.shape={H.shape}")
 
     n_bits = H.shape[0]
     exact_ones = args.ndel
     exact_zeros = n_bits - exact_ones
     batch_size = args.batch_size
-    num_combinations = binom(n_bits, exact_ones).item()
-    num_batches = math.ceil(num_combinations / batch_size)
-    out_dir = f"{args.A_directory}/energies_del{exact_ones}"
+    top_k = args.top_k
+
+    # Compute this worker's share of combinations
+    total_combs = int(binom(n_bits, exact_ones).item())
+    start_rank = rank * total_combs // world_size
+    end_rank = (rank + 1) * total_combs // world_size
+    my_combs = end_rank - start_rank
+
+    num_my_batches = math.ceil(my_combs / batch_size) if my_combs > 0 else 0
+    num_total_batches = math.ceil(total_combs / batch_size)
+
+    out_dir = f"{args.output_directory}/energies_del{exact_ones}"
     os.makedirs(out_dir, exist_ok=True)
-    print(f"Batch size: {batch_size}, Number of batches: {num_batches}")
+
+    print(f"[GPU {gpu_id}] rank={rank}, combinations [{start_rank}, {end_rank}), "
+          f"my_combs={my_combs}, my_batches={num_my_batches}")
+
+    # Create the combination iterator for this worker's range
+    # islice skips to our start position in C code (fast, ~30-50M comb/s)
+    comb_iter = islice(
+        combinations(range(n_bits), exact_zeros),
+        start_rank,
+        end_rank
+    )
 
     global_min_E = None
     global_min_vec = None
     global_min_index = None
 
+    # Async I/O: overlap disk writes with GPU computation
+    save_executor = ThreadPoolExecutor(max_workers=1)
+    save_future = None
+
     tini = time.time()
     i = 0
-    for indices, vecs in bitset_batches_exact_zeros(n_bits, exact_zeros, batch_size, device=device):
+
+    for indices, vecs in bitset_batches_from_iter(
+        comb_iter, n_bits, exact_zeros, batch_size, device=device
+    ):
         E = energy(vecs, H)
 
-        sorted_E, sorted_idx = torch.sort(E)
-        sorted_vecs = vecs[sorted_idx].to(torch.int64)
-        sorted_indices = indices[sorted_idx].to(torch.int64)
+        # topk instead of full sort: O(B log K) vs O(B log B), K << B
+        # Also dramatically reduces I/O: save only top-K instead of all B
+        actual_k = min(top_k, E.shape[0])
+        topk_E, topk_idx = torch.topk(E, k=actual_k, largest=False)
+        topk_vecs = vecs[topk_idx].to(torch.int64)
+        topk_indices = indices[topk_idx].to(torch.int64)
 
-        batch_min_E = sorted_E[0]
-        batch_min_vec = sorted_vecs[0]
-        batch_min_index = sorted_indices[0]
+        batch_min_E = topk_E[0]
+        batch_min_vec = topk_vecs[0]
+        batch_min_index = topk_indices[0]
 
         if (global_min_E is None) or (batch_min_E < global_min_E):
             global_min_E = batch_min_E.detach()
             global_min_vec = batch_min_vec.detach()
             global_min_index = batch_min_index.detach()
 
-        zero_pos = (batch_min_vec == 0).nonzero(as_tuple=True)[0]
-        one_pos  = (batch_min_vec == 1).nonzero(as_tuple=True)[0]
+        one_pos = (batch_min_vec == 1).nonzero(as_tuple=True)[0]
 
-        print(f"Batch {i+1}/{num_batches}")
-        print(f"min E={batch_min_E.item():.6f}")
-        print(f"vec={batch_min_vec.detach().cpu().numpy()}")
-        print(f"del={one_pos.detach().cpu().numpy()}")
+        print(f"[GPU {gpu_id}] Batch {i+1}/{num_my_batches} "
+              f"(global ~{start_rank // batch_size + i + 1}/{num_total_batches})")
+        print(f"  min E={batch_min_E.item():.6f}")
+        print(f"  vec={batch_min_vec.detach().cpu().numpy()}")
+        print(f"  del={one_pos.detach().cpu().numpy()}")
 
-        torch.save(
-            {
-                "energies": sorted_E.detach().cpu(),
-                "vecs": sorted_vecs.detach().cpu(),
-                "indices": sorted_indices.detach().cpu(),
-            },
-         os.path.join(out_dir, f"results_del{exact_ones}_bs={batch_size}_b={i}_{num_batches}.pt"),
+        # Wait for previous async save to complete
+        if save_future is not None:
+            save_future.result()
+
+        # Transfer top-K results to CPU and save asynchronously
+        result = {
+            "energies": topk_E.detach().cpu(),
+            "vecs": topk_vecs.detach().cpu(),
+            "indices": topk_indices.detach().cpu(),
+        }
+        save_future = save_executor.submit(
+            torch.save,
+            result,
+            os.path.join(out_dir,
+                         f"results_del{exact_ones}_bs={batch_size}"
+                         f"_b={i}_gpu{rank}.pt"),
         )
 
         i += 1
-        tit = time.time()
-        print(f"Time per batch: {(tit - tini)/i:.6f} seconds")
-    
-    min_E     = global_min_E
-    min_vec   = global_min_vec
-    min_index = global_min_index
-    one_pos   = (min_vec == 1).nonzero(as_tuple=True)[0]
+        elapsed = time.time() - tini
+        print(f"[GPU {gpu_id}] Avg time per batch: {elapsed / i:.6f} seconds, "
+              f"elapsed: {elapsed:.1f}s")
 
-    tfin = time.time()
-    print(f"Total time: {tfin - tini:.6f} seconds")
-    print(f"Global min energy E={min_E.item():.6f}")
-    print(f"vec={min_vec.detach().cpu().numpy()}, del={one_pos.detach().cpu().numpy()}")
+    # Wait for last async save to complete
+    if save_future is not None:
+        save_future.result()
+    save_executor.shutdown(wait=True)
+
+    # Save this GPU's local minimum for the main process to merge
+    if global_min_E is not None:
+        one_pos = (global_min_vec == 1).nonzero(as_tuple=True)[0]
+        tfin = time.time()
+        print(f"[GPU {gpu_id}] Total time: {tfin - tini:.6f} seconds")
+        print(f"[GPU {gpu_id}] Local min energy E={global_min_E.item():.6f}")
+        print(f"[GPU {gpu_id}] vec={global_min_vec.detach().cpu().numpy()}, "
+              f"del={one_pos.detach().cpu().numpy()}")
+
+        torch.save({
+            "min_E": global_min_E.detach().cpu(),
+            "min_vec": global_min_vec.detach().cpu(),
+            "min_index": global_min_index.detach().cpu(),
+        }, os.path.join(out_dir, f"_gpu{rank}_min.pt"))
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-A_directory", type=str,
+                        default="Amatrices/Llama-3-8B-Instruct_n_samples_2048/")
+    parser.add_argument("-output_directory", type=str,
+                        default="/data2/work/Block_removal_through_constrained_binary_optimization/"
+                                "Amatrices/Qwen3-8B_n_samples_2048_think/")
+    parser.add_argument("-ndel", type=int, default=18)
+    parser.add_argument("-batch_size", type=int, default=1024*1024*18)
+    parser.add_argument("-top_k", type=int, default=100,
+                        help="Number of lowest-energy states to save per batch (default: 100). "
+                             "Global top-K is guaranteed when per-batch top-K >= desired global K.")
+    parser.add_argument("-num_gpus", type=int, default=None,
+                        help="Number of GPUs to use (default: all available)")
+    parser.add_argument("-single_gpu", type=int, default=None,
+                        help="If set, run on a single GPU with this ID "
+                             "(for debugging / backward compatibility)")
+    args = parser.parse_args()
+
+    if args.single_gpu is not None:
+        # Single GPU mode (backward compatible)
+        worker(args.single_gpu, 1, args)
+    else:
+        # Multi-GPU mode
+        num_gpus = args.num_gpus or torch.cuda.device_count()
+        print(f"Launching {num_gpus} GPU workers...")
+        t_total_start = time.time()
+
+        mp.spawn(
+            worker,
+            args=(num_gpus, args),
+            nprocs=num_gpus,
+            join=True,
+        )
+
+        t_total_end = time.time()
+        print(f"\nAll workers finished. Wall time: {t_total_end - t_total_start:.2f} seconds")
+
+        # Merge local minima from all GPUs to find the global minimum
+        out_dir = f"{args.output_directory}/energies_del{args.ndel}"
+        global_min = None
+        for r in range(num_gpus):
+            fpath = os.path.join(out_dir, f"_gpu{r}_min.pt")
+            if os.path.exists(fpath):
+                data = torch.load(fpath, map_location="cpu")
+                if global_min is None or data["min_E"] < global_min["min_E"]:
+                    global_min = data
+                os.remove(fpath)  # clean up temp file
+
+        if global_min is not None:
+            one_pos = (global_min["min_vec"] == 1).nonzero(as_tuple=True)[0]
+            print(f"\n{'='*60}")
+            print(f"GLOBAL MINIMUM")
+            print(f"  Energy E = {global_min['min_E'].item():.6f}")
+            print(f"  vec      = {global_min['min_vec'].numpy()}")
+            print(f"  del      = {one_pos.numpy()}")
+            print(f"{'='*60}")

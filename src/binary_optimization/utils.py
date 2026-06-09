@@ -2,7 +2,7 @@ from transformers.models.llama.modeling_llama import LlamaMLP, LlamaDecoderLayer
 
 import torch
 from src.binary_optimization.new_layer import (
-     BlockPruningLlamaDecoderLayer, BlockPruningQwen3DecoderLayer
+     BlockPruningLlamaDecoderLayer, BlockPruningQwen3DecoderLayer, BlockPruningDeepseekV4DecoderLayer
 )
 import json
 
@@ -88,14 +88,29 @@ def prepare_block(
         SystemExit: If an unsupported layer_type is provided.
     """
 
-    device=layer.self_attn.q_proj.weight.device
-    dtype=layer.self_attn.q_proj.weight.dtype
-    if layer_type == "qwen3":
-        new_decoder_layer = BlockPruningQwen3DecoderLayer(config, idx,device=device, dtype=dtype,scale=scale)
+    if layer_type == "deepseek_v4":
+        device=layer.self_attn.kv_proj.weight.device
+        # FP8 weights can't be used for pruning_param (no mul/backward support)
+        # Use the model's configured torch_dtype (bfloat16) instead
+        dtype=torch.bfloat16
+    else:
+        device=layer.self_attn.q_proj.weight.device
+        dtype=layer.self_attn.q_proj.weight.dtype
+    if layer_type == "deepseek_v4":
+        # For FP8 models: reuse original sub-modules by reference (preserves FP8 quantization)
+        # No copy_matching_weights needed - sub-modules are shared, not copied
+        new_decoder_layer = BlockPruningDeepseekV4DecoderLayer(
+            original_layer=layer, layer_idx=idx, device=device, dtype=dtype, scale=scale
+        )
+    elif layer_type == "qwen3":
+        new_decoder_layer = BlockPruningQwen3DecoderLayer(config, idx, device=device, dtype=dtype, scale=scale)
     elif layer_type == "llama":
-        new_decoder_layer = BlockPruningLlamaDecoderLayer(config, idx,device=device, dtype=dtype,scale=scale)
+        new_decoder_layer = BlockPruningLlamaDecoderLayer(config, idx, device=device, dtype=dtype, scale=scale)
     else:
         print("error no proper architecture found")
         exit()
-    copy_matching_weights(new_decoder_layer, layer)
+    # copy_matching_weights only needed for llama/qwen3 (new sub-modules created from scratch)
+    # For deepseek_v4, sub-modules are reused by reference, no weight copying needed
+    if layer_type != "deepseek_v4":
+        copy_matching_weights(new_decoder_layer, layer)
     return new_decoder_layer

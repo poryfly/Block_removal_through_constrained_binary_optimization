@@ -1,6 +1,8 @@
 # Core Deep Learning Framework
 torch>=2.0.0
 transformers>=4.50.0
+safetensors>=0.7.0
+kernels<0.15
 
 # Training and Fine-tuning
 accelerate>=0.20.0

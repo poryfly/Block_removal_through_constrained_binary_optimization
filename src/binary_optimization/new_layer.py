@@ -5,6 +5,7 @@ from torch.nn import functional as F
 
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaRMSNorm, LlamaMLP, LlamaConfig
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3RMSNorm, Qwen3Config, Qwen3MLP
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Attention, DeepseekV4SparseMoeBlock, DeepseekV4RMSNorm, DeepseekV4HyperConnection, DeepseekV4Config
 from typing import Callable, Optional, Tuple, Union
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_layers import (
@@ -185,3 +186,110 @@ class BlockPruningQwen3DecoderLayer(GradientCheckpointingLayer):
 
         hidden_states = residual + hidden_states*self.pruning_param
         return hidden_states
+
+
+class BlockPruningDeepseekV4DecoderLayer(GradientCheckpointingLayer):
+    """
+    DeepSeek-V4 decoder layer with pruning parameters using full interpolation.
+
+    Uses HyperConnection's multi-stream architecture with interpolation:
+    output = alpha * layer_output + (1 - alpha) * hidden_states
+    When alpha -> 0, the layer becomes an identity mapping, enabling clean block removal.
+
+    IMPORTANT: For FP8-quantized models, this class reuses sub-modules from the original
+    layer by reference (not copy). This preserves FP8 quantization and GPU placement,
+    avoiding the 4x memory expansion that would occur if new unquantized sub-modules
+    were created from scratch.
+
+    Args:
+        original_layer: The original DeepseekV4DecoderLayer to reuse sub-modules from.
+        layer_idx: Index of this layer in the model.
+        scale: Initial value for the pruning parameter.
+        device: Device to place the pruning parameter on.
+        dtype: Data type for the pruning parameter.
+    """
+    def __init__(self, original_layer, layer_idx: int, scale, device, dtype):
+        super().__init__()
+        self.hidden_size = original_layer.self_attn.config.hidden_size
+
+        # Reuse sub-modules from original layer by reference (preserves FP8 quantization & GPU placement)
+        # Creating new sub-modules from scratch would produce float32 unquantized weights,
+        # which are 4x larger than FP8 and cause OOM when dispatch_model moves them to GPU.
+        self.self_attn = original_layer.self_attn
+        self.mlp = original_layer.mlp
+        self.input_layernorm = original_layer.input_layernorm
+        self.post_attention_layernorm = original_layer.post_attention_layernorm
+        self.attn_hc = original_layer.attn_hc
+        self.ffn_hc = original_layer.ffn_hc
+        # FP8 dtypes don't support mul/backward needed for pruning_param
+        # Force bfloat16 if an FP8 dtype was accidentally passed
+        if dtype in (torch.float8_e4m3fn, torch.float8_e5m2,
+                     torch.float8_e4m3fnuz, torch.float8_e5m2fnuz):
+            dtype = torch.bfloat16
+        initial_values = (scale*torch.ones(1, 1).to(dtype).to(device))
+        self.pruning_param = torch.nn.Parameter(initial_values)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[dict] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        """
+        Forward pass with full interpolation pruning.
+
+        The pruning parameter interpolates between identity (alpha=0) and the
+        normal layer output (alpha=1). This naturally smooths both the sublayer
+        contribution and the stream mixing (effective comb = alpha*comb.T + (1-alpha)*I).
+
+        Args:
+            hidden_states: Input hidden states tensor [B, S, hc_mult, H].
+            input_ids: Token IDs needed for hash_moe routing (Layer 0-2).
+            attention_mask: Optional attention mask.
+            position_ids: Optional position IDs.
+            past_key_values: Optional cached key-value pairs.
+            use_cache: Whether to use cached key-value pairs.
+            cache_position: Optional cache position tensor.
+            position_embeddings: Dict with "main" and "compress" RoPE embeddings.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            Output hidden states after interpolation pruning.
+        """
+        dtype = hidden_states.dtype
+
+        # Step 1: Attention sublayer with full interpolation
+        residual_attn = hidden_states
+        post_attn, comb_attn, collapsed_attn = self.attn_hc(hidden_states)
+        attn_output, _ = self.self_attn(
+            self.input_layernorm(collapsed_attn),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        attn_layer_out = post_attn.to(dtype).unsqueeze(-1) * attn_output.unsqueeze(-2) + torch.matmul(
+            comb_attn.to(dtype).transpose(-1, -2), hidden_states
+        )
+        hidden_states = self.pruning_param * attn_layer_out + (1 - self.pruning_param) * residual_attn
+
+        # Step 2: MLP sublayer with full interpolation
+        residual_mlp = hidden_states
+        post_mlp, comb_mlp, collapsed_mlp = self.ffn_hc(hidden_states)
+        mlp_output = self.mlp(
+            self.post_attention_layernorm(collapsed_mlp),
+            input_ids=input_ids,
+        )
+        mlp_layer_out = post_mlp.to(dtype).unsqueeze(-1) * mlp_output.unsqueeze(-2) + torch.matmul(
+            comb_mlp.to(dtype).transpose(-1, -2), hidden_states
+        )
+        return self.pruning_param * mlp_layer_out + (1 - self.pruning_param) * residual_mlp

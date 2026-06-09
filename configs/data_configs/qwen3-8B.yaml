@@ -1,0 +1,6 @@
+tokenizer:
+  path: "/data/.cache/models/Qwen/Qwen3-8B"
+  model_type: "qwen3"
+dataset:
+  name:  "/data/.cache/hub/datasets/AI-ModelScope/ShareGPT-Chinese-English-90k/sharegpt_jsonl"
+  output_path: "datasets/ShareGPT-Chinese-English-90k/preprocessed-Qwen3-8B/"

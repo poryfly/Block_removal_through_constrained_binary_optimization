@@ -1,0 +1,14 @@
+model:
+  path: "/data/.cache/models/Qwen/Qwen3-8B"
+  dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"
+  output_path: "Amatrices/Qwen3-8B_n_samples_2048_think"
+  output_format: "hf"
+  save_model: False
+
+calibration:
+  dataset_path: "datasets/ShareGPT-Chinese-English-90k/preprocessed-Qwen3-8B/" #"datasets/OpenHermes-2.5/preprocessed-Qwen3-8B"
+  n_samples: 2048
+  seed: 42
+  batch_size: 1
+  sequence_filter: null

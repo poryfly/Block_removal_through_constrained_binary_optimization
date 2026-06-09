@@ -1,0 +1,25 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_forward_prefetch: false
+  fsdp_offload_params: false       # 6.65B模型8×32GB无需offload，关闭后提速1.5-2×
+  fsdp_sharding_strategy: FULL_SHARD # 核心：FSDP2的全分片策略（类似ZeRO-3）
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+  fsdp_use_orig_params: true       # 兼容LoRA/QLoRA必须开启
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16              # 必须开启bf16（3090/4090等显卡推荐）或fp16
+num_machines: 1
+num_processes: 8                  # 对应你的4张显卡
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
