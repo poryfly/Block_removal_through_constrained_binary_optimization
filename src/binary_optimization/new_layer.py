@@ -264,6 +264,17 @@ class BlockPruningDeepseekV4DecoderLayer(GradientCheckpointingLayer):
         """
         dtype = hidden_states.dtype
 
+        # CRITICAL: Set CUDA device context before any sub-module forward.
+        # DeepGEMM SM120 uses at::cuda::getCurrentCUDAStream() which depends on the
+        # CUDA context (set by torch.cuda.set_device). accelerate's AlignDevicesHook
+        # moves tensors via .to(device) but does NOT call set_device, so the CUDA
+        # context may be on a different device than the layer's execution device.
+        # Without this, DeepGEMM kernels launch on the wrong device's stream and
+        # access TMA descriptors pointing to another device → illegal memory access.
+        target_device = self.pruning_param.device
+        if target_device.type == 'cuda':
+            torch.cuda.set_device(target_device.index)
+
         # Step 1: Attention sublayer with full interpolation
         residual_attn = hidden_states
         post_attn, comb_attn, collapsed_attn = self.attn_hc(hidden_states)

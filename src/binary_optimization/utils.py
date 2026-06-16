@@ -9,6 +9,8 @@ import json
 from math import pi
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+from accelerate.hooks import add_hook_to_module
+
 
 def prepare_pruning(
     model, scale=1.0
@@ -27,6 +29,15 @@ def prepare_pruning(
     Returns:
         None: The model is modified in-place.
     """
+    # Step 1: Collect accelerate hooks from original layers BEFORE replacement
+    # These hooks (AlignDevicesHook) manage tensor device placement across GPUs
+    saved_hooks = {}
+    for i in range(len(model.model.layers)):
+        hook = getattr(model.model.layers[i], "_hf_hook", None)
+        if hook is not None:
+            saved_hooks[i] = hook
+
+    # Step 2: Replace layers with pruning-enabled layers
     for i in range(len(model.model.layers)):
         new_layer=prepare_block(
                     model.model.layers[i],
@@ -36,6 +47,14 @@ def prepare_pruning(
                     layer_type=model.config.model_type,
                 )
         model.model.layers[i] = new_layer
+
+    # Step 3: Re-attach accelerate hooks to replacement layers
+    # Without this, multi-GPU device management breaks (tensors stay on wrong device)
+    for i, hook in saved_hooks.items():
+        add_hook_to_module(model.model.layers[i], hook)
+
+    if saved_hooks:
+        print(f"  Re-attached accelerate hooks to {len(saved_hooks)} replaced layers")
 
     return
 
