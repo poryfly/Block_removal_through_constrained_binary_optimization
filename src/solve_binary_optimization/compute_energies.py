@@ -5,13 +5,97 @@ import time
 import os
 import math
 import argparse
-from itertools import combinations, islice
+from itertools import combinations
 from concurrent.futures import ThreadPoolExecutor
 
 import sys
 sys.path.insert(0, os.getcwd())
 
 from util import binom
+
+
+def combination_unrank(n, k, rank):
+    """
+    Return the `rank`-th combination (0-indexed) from
+    itertools.combinations(range(n), k) in lexicographic order.
+
+    Uses the greedy combinatorial unranking algorithm:
+    for each position i, find the smallest element j such that
+    C(n - 1 - j, k - 1 - i) > remaining_rank.
+
+    Time complexity: O(n * k), effectively O(1) for typical n, k.
+
+    Args:
+        n: total number of elements (range is 0..n-1)
+        k: number of elements to choose
+        rank: 0-based index in the lexicographic ordering
+
+    Returns:
+        tuple of k integers, identical to list(combinations(range(n), k))[rank]
+
+    Raises:
+        ValueError: if rank < 0 or rank >= C(n, k)
+    """
+    total = math.comb(n, k)
+    if rank < 0 or rank >= total:
+        raise ValueError(
+            f"rank must be in [0, {total}), got {rank}"
+        )
+    if k == 0:
+        return ()
+    result = []
+    start = 0
+    for i in range(k):
+        for j in range(start, n):
+            # Number of combinations with j at position i:
+            # choose remaining (k - 1 - i) elements from {j+1, ..., n-1}
+            c = math.comb(n - 1 - j, k - 1 - i)
+            if c > rank:
+                result.append(j)
+                start = j + 1
+                break
+            rank -= c
+    return tuple(result)
+
+
+def combinations_from_range(n, k, start_rank, end_rank):
+    """
+    Generate combinations from rank `start_rank` (inclusive) to `end_rank`
+    (exclusive), equivalent to:
+        islice(itertools.combinations(range(n), k), start_rank, end_rank)
+
+    Uses `combination_unrank` to jump directly to the start position in
+    O(n * k) time, then iterates via the standard "next combination"
+    algorithm (find rightmost incrementable position).
+
+    Args:
+        n: total number of elements (range is 0..n-1)
+        k: number of elements to choose
+        start_rank: 0-based starting rank (inclusive)
+        end_rank: 0-based ending rank (exclusive)
+
+    Yields:
+        tuples of k integers, identical to itertools.combinations output
+    """
+    if start_rank >= end_rank:
+        return
+
+    comb = list(combination_unrank(n, k, start_rank))
+    for _ in range(start_rank, end_rank):
+        yield tuple(comb)
+        # Standard "next combination in lex order":
+        # Find rightmost position i where comb[i] can be incremented
+        # (i.e., comb[i] < n - k + i), increment it, and reset all
+        # subsequent positions to consecutive values.
+        i = k - 1
+        while i >= 0 and comb[i] == n - k + i:
+            i -= 1
+        if i < 0:
+            # This was the last combination; stop.
+            return
+        comb[i] += 1
+        for j in range(i + 1, k):
+            comb[j] = comb[j - 1] + 1
 
 
 @torch.no_grad()
@@ -122,8 +206,9 @@ def worker(rank, world_size, args):
     GPU worker: processes its share of the combination space.
 
     The total C(n_bits, exact_ones) combinations are split across
-    world_size GPUs by rank. Each worker uses itertools.islice
-    to skip to its assigned range, then processes batches normally.
+    world_size GPUs by rank. Each worker uses combination_unrank
+    to jump directly to its assigned range in O(n*k) time, then
+    iterates via the standard next-combination algorithm.
     """
     gpu_id = rank
     device = f"cuda:{gpu_id}"
@@ -160,12 +245,9 @@ def worker(rank, world_size, args):
           f"my_combs={my_combs}, my_batches={num_my_batches}")
 
     # Create the combination iterator for this worker's range
-    # islice skips to our start position in C code (fast, ~30-50M comb/s)
-    comb_iter = islice(
-        combinations(range(n_bits), exact_zeros),
-        start_rank,
-        end_rank
-    )
+    # combinations_from_range uses O(n*k) unranking to jump directly
+    # to start_rank, eliminating the O(start_rank) islice linear scan.
+    comb_iter = combinations_from_range(n_bits, exact_zeros, start_rank, end_rank)
 
     global_min_E = None
     global_min_vec = None
@@ -259,8 +341,8 @@ if __name__ == "__main__":
     parser.add_argument("-output_directory", type=str,
                         default="/data2/work/Block_removal_through_constrained_binary_optimization/"
                                 "Amatrices/Qwen3-8B_n_samples_2048_think/")
-    parser.add_argument("-ndel", type=int, default=18)
-    parser.add_argument("-batch_size", type=int, default=1024*1024*18)
+    parser.add_argument("-ndel", type=int, default=8)
+    parser.add_argument("-batch_size", type=int, default=1024*1024*8)
     parser.add_argument("-top_k", type=int, default=100,
                         help="Number of lowest-energy states to save per batch (default: 100). "
                              "Global top-K is guaranteed when per-batch top-K >= desired global K.")

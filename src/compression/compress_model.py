@@ -255,6 +255,12 @@ def rename_weight_key(name):
         # Flatten the extra `scorer` wrapper so the remap can match.
         if rest.startswith("scorer.weights_proj"):
             rest = "weights_proj" + rest[len("scorer.weights_proj"):]
+        # HF uses `q_b_proj` (LoRA naming convention), but DeepSeek original checkpoint
+        # and sglang's C4Indexer use `wq_b` (DeepSeek wq_a/wq_b convention).
+        if rest.startswith("q_b_proj."):
+            rest = "wq_b." + rest[len("q_b_proj."):]
+        elif rest == "q_b_proj":
+            rest = "wq_b"
         new_prefix = layer_prefix.replace("model.", "", 1)
         return f"{new_prefix}.attn.indexer.{rest}"
 
